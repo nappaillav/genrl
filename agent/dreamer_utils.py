@@ -559,13 +559,12 @@ class Encoder(Module):
 
   def __init__(
       self, shapes, cnn_keys=r'.*', mlp_keys=r'.*', act='SiLU', norm='none',
-      cnn_depth=48, cnn_kernels=(4, 4, 4, 4), mlp_layers=[400, 400, 400, 400], symlog_inputs=False,):
+      cnn_depth=48, cnn_kernels=(4, 4, 4, 4), mlp_layers=[400, 400, 400, 400], symlog_inputs=False, **kwargs):
     super().__init__()
     self.shapes = shapes
-    self.cnn_keys = [
-        k for k, v in shapes.items() if re.match(cnn_keys, k) and len(v) == 3]
-    self.mlp_keys = [
-        k for k, v in shapes.items() if re.match(mlp_keys, k) and len(v) == 1]
+    self.goal_key = kwargs.get('goal',None)
+    self.cnn_keys = self.get_keys(shapes=shapes, keys=cnn_keys, goal_keys=self.goal_key, dim=3)
+    self.mlp_keys =  self.get_keys(shapes=shapes, keys=mlp_keys, goal_keys=self.goal_key, dim=1)
     print('Encoder CNN inputs:', list(self.cnn_keys))
     print('Encoder MLP inputs:', list(self.mlp_keys))
     self._act = get_act(act)
@@ -600,7 +599,13 @@ class Encoder(Module):
       if len(self._mlp_model) == 0:
         self._mlp_model.append(nn.Identity())
       self._mlp_model = nn.Sequential(*self._mlp_model)
-
+  
+  def get_keys(self, shapes, keys, goal_key, dim):
+    if goal_key:
+      return [k for k, v in shapes.items() if (re.match(goal_key, k) or re.match(keys, k)) and len(v) == dim]
+    else:
+      return [k for k, v in shapes.items() if re.match(keys, k) and len(v) == dim]
+  
   def forward(self, data):
     key, shape = list(self.shapes.items())[0]
     batch_dims = data[key].shape[:-len(shape)]
@@ -632,14 +637,13 @@ class Decoder(Module):
 
   def __init__(
       self, shapes, cnn_keys=r'.*', mlp_keys=r'.*', act='SiLU', norm='none',
-      cnn_depth=48, cnn_kernels=(4, 4, 4, 4), mlp_layers=[400, 400, 400, 400], embed_dim=1024, mlp_dist='mse', image_dist='mse'):
+      cnn_depth=48, cnn_kernels=(4, 4, 4, 4), mlp_layers=[400, 400, 400, 400], embed_dim=1024, mlp_dist='mse', 
+      image_dist='mse', **kwargs):
     super().__init__()
     self._embed_dim = embed_dim
-    self._shapes = shapes
-    self.cnn_keys = [
-        k for k, v in shapes.items() if re.match(cnn_keys, k) and len(v) == 3]
-    self.mlp_keys = [
-        k for k, v in shapes.items() if re.match(mlp_keys, k) and len(v) == 1]
+    self.goal_key = kwargs.get('goal',None)
+    self.cnn_keys = self.get_keys(shapes=shapes, keys=cnn_keys, goal_keys=self.goal_key, dim=3)
+    self.mlp_keys =  self.get_keys(shapes=shapes, keys=mlp_keys, goal_keys=self.goal_key, dim=1)
     print('Decoder CNN outputs:', list(self.cnn_keys))
     print('Decoder MLP outputs:', list(self.mlp_keys))
     self._act = get_act(act)
@@ -683,6 +687,12 @@ class Decoder(Module):
       for key, shape in { k : shapes[k] for k in self.mlp_keys }.items():
         self.add_module(f'dense_{key}', DistLayer(width, shape, dist=self._mlp_dist))
 
+  def get_keys(self, shapes, keys, goal_key, dim):
+    if goal_key:
+      return [k for k, v in shapes.items() if (re.match(goal_key, k) or re.match(keys, k)) and len(v) == dim]
+    else:
+      return [k for k, v in shapes.items() if re.match(keys, k) and len(v) == dim]
+  
   def forward(self, features):
     outputs = {}
     

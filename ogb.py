@@ -17,8 +17,9 @@ from dm_env import specs
 
 import tools.utils as utils
 from tools.logger import Logger
-from tools.replay import ReplayBuffer, make_replay_loader
-
+from tools.replay import OGReplayBuffer, make_replay_loader
+import gymnasium as gym
+import ogbench 
 torch.backends.cudnn.benchmark = True
 
 def make_agent(obs_type, obs_spec, action_spec, num_expl_steps, cfg):
@@ -35,6 +36,21 @@ def make_dreamer_agent(obs_space, action_spec, cur_config, cfg):
     if hasattr(cur_config, 'agent'):
         del cur_config.agent
     return hydra.utils.instantiate(cfg, cfg=cur_config, obs_space=obs_space, act_spec=action_spec)
+
+# class ChannelFirstWrapper(gym.ObservationWrapper):
+#     def __init__(self, env):
+#         super().__init__(env)
+#         h, w, c = env.observation_space.shape
+#         self.observation_space = gym.spaces.Box(low=0, 
+#                                                 high=255, 
+#                                                 shape=(c, h, w),
+#                                                 dtype=np.uint8
+#                                                 )
+#     def observation(self, observation):
+#         return np.transpose(observation, (2, 0, 1))
+
+def make_env(env_name, **env_kwargs):
+    return ogbench.make_env_and_datasets(env_name, **env_kwargs)
 
 class Workspace:
     def __init__(self, cfg, savedir=None, workdir=None,):
@@ -54,18 +70,34 @@ class Workspace:
         self.task = task = cfg.task
         img_size = cfg.img_size
 
-        import envs.main as envs
-        self.train_env = envs.make(task, cfg.obs_type, cfg.action_repeat, cfg.seed, img_size=img_size,  viclip_encode=cfg.viclip_encode, clip_hd_rendering=cfg.clip_hd_rendering) 
-
+        # import envs.main as envs
+        # self.train_env = envs.make(task, cfg.obs_type, cfg.action_repeat, cfg.seed, img_size=img_size,  viclip_encode=cfg.viclip_encode, clip_hd_rendering=cfg.clip_hd_rendering) 
+        # use the ogbench_env
+        # observation_space swap
+        self.train_env = ogbench.make_env_and_datasets(cfg.task, env_only=True)
+        h, w, c = self.train_env.observation_space.shape
+        observation_space = dict(observation = gym.spaces.Box(low=0, high=255, shape=(c, h, w), dtype=np.uint8),
+                                is_first = gym.spaces.Box(low=0, high=1, shape = (), dtype=bool),
+                                is_last = gym.spaces.Box(low=0, high=1, shape = (), dtype=bool),
+                                is_terminal = gym.spaces.Box(low=0, high=1, shape = (), dtype=bool),
+                                observation_goal = gym.spaces.Box(low=0, high=255, shape=(c, h, w), dtype=np.uint8),
+                                )
+        action_space = self.train_env.action_space
+        data_specs = (
+            observation_space,
+            dict(action=action_space),
+            dict(reward=gym.spaces.Box(low=0, high=1, shape = (1,), dtype=np.float32)),
+            dict(discount=gym.spaces.Box(low=0, high=1, shape = (1,), dtype=np.float32)),
+        )
 
         # # create agent 
-        sample_agent = make_dreamer_agent(self.train_env.obs_space, self.train_env.act_space['action'], cfg, cfg.agent)
+        sample_agent = make_dreamer_agent(observation_space, action_space, cfg, cfg.agent)
 
         # create replay buffer
-        data_specs = (self.train_env.obs_space,
-                      self.train_env.act_space,
-                      specs.Array((1,), np.float32, 'reward'),
-                      specs.Array((1,), np.float32, 'discount'))
+        # data_specs = (self.train_env.obs_space,
+        #               self.train_env.act_space,
+        #               specs.Array((1,), np.float32, 'reward'),
+        #               specs.Array((1,), np.float32, 'discount'))
 
         if cfg.train_from_data:
             # Loading replay buffer
@@ -91,7 +123,7 @@ class Workspace:
                 replay_dir = Path(cfg.replay_load_dir)
 
             # create data storage
-            self.replay_storage = ReplayBuffer(data_specs, [],
+            self.replay_storage = OGReplayBuffer(data_specs, [],
                                                     replay_dir,
                                                     length=cfg.batch_length, **cfg.replay,
                                                     device=cfg.device, ignore_extra_keys=True, load_recursive=True)
@@ -158,17 +190,21 @@ class Workspace:
         else:
             self.agent = sample_agent
 
-        self.eval_env = envs.make(self.task, self.cfg.obs_type, self.cfg.action_repeat, self.cfg.seed, img_size=64, )
+        # self.eval_env = envs.make(self.task, self.cfg.obs_type, self.cfg.action_repeat, self.cfg.seed, img_size=64, )
+        self.eval_env = ogbench.make_env_and_datasets(cfg.task, env_only=True)
         if hasattr(self.eval_env, 'eval_mode'):
             self.eval_env.eval_mode()
-        eval_specs = (self.eval_env.obs_space,
-                        self.eval_env.act_space,
-                        specs.Array((1,), np.float32, 'reward'),
-                        specs.Array((1,), np.float32, 'discount'))
-        self.eval_storage = ReplayBuffer(eval_specs, {},
+        eval_specs = (
+            observation_space,
+            dict(action=action_space),
+            dict(reward=gym.spaces.Box(low=0, high=1, shape = (1,), dtype=np.float32)),
+            dict(discount=gym.spaces.Box(low=0, high=1, shape = (1,), dtype=np.float32)),
+        )
+        self.eval_storage = OGReplayBuffer(eval_specs, {},
                                                 self.workdir / 'eval_buffer',
                                                 length=cfg.batch_length, **cfg.replay,
                                                 device=cfg.device, ignore_extra_keys=True,)
+        ##################### TODO : LOAD VAL DATA FOR evaluation #######################
         self.eval_storage._minlen = 1
 
         self.timer = utils.Timer()
@@ -194,6 +230,11 @@ class Workspace:
         return self._replay_iter
 
     def eval(self):
+        """
+        This will be re-written according to the OGbench test 
+        OPTION 1 : Validate using the Validation data 
+        Option 2 : Test in the environment, these env give 
+        """
         import envs.main as envs
         eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
         episode_reward = []
@@ -250,7 +291,7 @@ class Workspace:
         self.agent._acting_behavior = self.agent._backup_acting_behavior
 
     def train(self):
-        # predicates
+        # 
         train_until_step = utils.Until(self.cfg.num_train_frames, 1)
         eval_every_step = utils.Every(self.cfg.eval_every_frames, 1)
         should_log_scalars = utils.Every(self.cfg.log_every_frames, 1)
@@ -271,12 +312,15 @@ class Workspace:
             if self.cfg.train_from_data:
                 # Sampling data
                 batch_data = next(self.replay_iter)
+                # Set Active OGB
                 if self.cfg.train_world_model:
+                    # print(f"Update : {self.global_step}")
                     state, outputs, metrics = self.agent.update_wm(batch_data, self.global_step)
                 else:
                     with torch.no_grad():
                         outputs, metrics = self.agent.wm.observe_data(batch_data,)
                 if self.cfg.train_connector:
+                    #OGB Do we need to train this for Dreamer v3
                     _, metrics = self.agent.wm.update_additional_detached_modules(batch_data, outputs, metrics)
             else:
                 imag_warmup_steps = self.cfg.imag_warmup_steps
@@ -336,10 +380,12 @@ class Workspace:
 
                 is_terminal = torch.zeros(self.cfg.batch_size, self.cfg.batch_length, device=self.agent.device)
                 outputs = dict(post=post, is_terminal=is_terminal)
+            # OGB: How is this function used Dreamer
             if getattr(self.cfg.agent, 'imag_reward_fn', None) is not None:
                 metrics.update(self.agent.update_imag_behavior(state=None, outputs=outputs, metrics=metrics, seq_data=batch_data,)[1])
 
             if self.global_step > 0:
+                # update the metrics
                 if should_log_scalars(self.global_step):
                     if hasattr(self, 'replay_storage'):
                         metrics.update(self.replay_storage.stats)
@@ -376,7 +422,7 @@ class Workspace:
     def setup_wandb(self):
         cfg = self.cfg
         exp_name = '_'.join([
-            cfg.experiment, cfg.agent.name, cfg.task, cfg.obs_type, 
+            cfg.experiment, cfg.agent.name, cfg.task, cfg.obs_type,
             str(cfg.seed)
         ])
         wandb.init(project=cfg.project_name, group=cfg.agent.name, name=exp_name)
@@ -430,7 +476,7 @@ class Workspace:
         return snapshot_dir 
 
 def start_training(cfg, savedir, workdir):
-    from train import Workspace as W
+    from ogb import Workspace as W
     root_dir = Path.cwd()
     cfg.workdir = str(root_dir)
     workspace = W(cfg, savedir, workdir)
@@ -444,7 +490,7 @@ def start_training(cfg, savedir, workdir):
         workspace.setup_wandb()
     workspace.train()
 
-@hydra.main(config_path='.', config_name='train')
+@hydra.main(config_path='.', config_name='ogb')
 def main(cfg):
     start_training(cfg, None, None)
 

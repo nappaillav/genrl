@@ -249,6 +249,82 @@ class ReplayBuffer(IterableDataset):
         f2.write(f1.read())
     return filename
 
+class OGReplayBuffer(ReplayBuffer):
+  def __init__(self, *args, **kwargs):
+    super(OGReplayBuffer, self).__init__(*args, **kwargs)
+
+  def store_episode(self, filename=None, episode=None, run_checks=True):
+    if filename is not None:
+      episode = load_episode(filename)
+      if len(episode['reward'].shape) == 1:
+        episode['reward'] = episode['reward'].reshape(-1, 1)
+      if 'discount' not in episode:
+        episode['discount'] = (1 - episode['is_terminal']).reshape(-1, 1).astype(np.float32)
+      #
+      if run_checks:
+        for spec_set in [self._data_specs, self._meta_specs]: 
+          for spec in spec_set:
+            if type(spec) in [dict, Dict]:
+              for k,v in spec.items():
+                  if k == 'observation_goal':
+                    continue
+                  value = episode[k][0]
+                  assert v.shape == value.shape and v.dtype == value.dtype, f"for ({k}) expected {v.dtype, v.shape, }), received ({value.dtype, value.shape, })"
+            else:
+              value = episode[spec.name][0]
+              assert spec.shape == value.shape and spec.dtype == value.dtype, f"for ({spec.name}) expected {spec.dtype, spec.shape, }), received ({value.dtype, value.shape, })"
+    if not episode:
+      return False
+    length = eplen(episode)
+    if run_checks:
+      for k in episode:
+        assert len(episode[k]) == length, f'Found {episode[k].shape} VS eplen: {length}'
+
+    # Enforce limit
+    while self._loaded_steps + length > self._capacity:
+      for k in self._complete_eps:
+        self._complete_eps[k].pop(0)
+      removed_len, self._episode_lens = self._episode_lens[0], self._episode_lens[1:]
+      self._loaded_steps -= removed_len
+      self._loaded_episodes -= 1
+
+    # add episode
+    for k,v in episode.items():
+      if k not in self._complete_eps:
+        if self._ignore_extra_keys: continue
+        else: raise KeyError("Extra key ", k)
+      self._complete_eps[k].append(v)
+    self._episode_lens = np.append(self._episode_lens, length)
+    self._loaded_steps += length
+    self._loaded_episodes += 1
+
+    return True
+  
+  def __iter__(self):
+    while True:
+      sequences, batch_size, batch_length = self._loaded_episodes, self.batch_size, self._length
+      """Selects the trajectory, selects the start location and crops till the max_length"""
+      b_indices = np.random.randint(0, sequences, size=batch_size)
+      t_indices = np.random.randint(np.zeros(batch_size) + self._min_t_sampling, self._episode_lens[b_indices]-batch_length+1, size=batch_size)
+      t_ranges = np.repeat( np.expand_dims(np.arange(0, batch_length,), 0), batch_size, axis=0) + np.expand_dims(t_indices, 1)
+      g_indices = np.repeat(t_ranges[:, -1], batch_length, axis=0).reshape(batch_size, batch_length)
+      chunk = {}
+      for k in self._complete_eps:
+        if k == 'observation_goal':
+          continue
+        if k =='reward':
+          # reward (1. step's to go, 2. (-1 & 0) 3.(0, 1))
+          r = (t_ranges - np.expand_dims(t_indices, 1)) + 1
+          chunk[k] = np.expand_dims(r / r.max(axis=1), axis=2)
+        else:
+          chunk[k] = np.stack([self._complete_eps[k][b][t] for b,t in zip(b_indices, t_ranges)])
+      # Goal observation
+      # goal <- ['observation'][b][t_indices[:, -1]] --> last index
+      chunk['observation_goal'] = np.stack([self._complete_eps['observation'][b][t] for b,t in zip(b_indices, g_indices)])
+      for k in chunk: 
+        chunk[k] = torch.as_tensor(chunk[k], device=self.device)
+      yield chunk
+
 def load_episode(filename):
   try:
     with filename.open('rb') as f:

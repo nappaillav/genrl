@@ -61,7 +61,7 @@ seed_snapshot: null
 agent_name_snapshot: null
 
 snapshot_load_dir: null
-replay_load_dir: /home/wtc/sai/dev/genrl/data/ogbench/visual-antmaze-medium-navigate
+replay_load_dir: /home/wtc/sai/genrl/data/ogbench/visual-antmaze-medium-navigate
 
 # 
 snapshot_step: null

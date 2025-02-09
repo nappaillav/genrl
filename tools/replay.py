@@ -266,7 +266,7 @@ class OGReplayBuffer(ReplayBuffer):
           for spec in spec_set:
             if type(spec) in [dict, Dict]:
               for k,v in spec.items():
-                  if k == 'observation_goal':
+                  if k == 'goal':
                     continue
                   value = episode[k][0]
                   assert v.shape == value.shape and v.dtype == value.dtype, f"for ({k}) expected {v.dtype, v.shape, }), received ({value.dtype, value.shape, })"
@@ -310,7 +310,7 @@ class OGReplayBuffer(ReplayBuffer):
       g_indices = np.repeat(t_ranges[:, -1], batch_length, axis=0).reshape(batch_size, batch_length)
       chunk = {}
       for k in self._complete_eps:
-        if k == 'observation_goal':
+        if k == 'goal':
           continue
         if k =='reward':
           # reward (1. step's to go, 2. (-1 & 0) 3.(0, 1))
@@ -320,7 +320,7 @@ class OGReplayBuffer(ReplayBuffer):
           chunk[k] = np.stack([self._complete_eps[k][b][t] for b,t in zip(b_indices, t_ranges)])
       # Goal observation
       # goal <- ['observation'][b][t_indices[:, -1]] --> last index
-      chunk['observation_goal'] = np.stack([self._complete_eps['observation'][b][t] for b,t in zip(b_indices, g_indices)])
+      chunk['goal'] = np.stack([self._complete_eps['observation'][b][t] for b,t in zip(b_indices, g_indices)])
       for k in chunk: 
         chunk[k] = torch.as_tensor(chunk[k], device=self.device)
       yield chunk

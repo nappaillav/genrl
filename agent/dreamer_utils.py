@@ -563,8 +563,8 @@ class Encoder(Module):
     super().__init__()
     self.shapes = shapes
     self.goal_key = kwargs.get('goal',None)
-    self.cnn_keys = self.get_keys(shapes=shapes, keys=cnn_keys, goal_keys=self.goal_key, dim=3)
-    self.mlp_keys =  self.get_keys(shapes=shapes, keys=mlp_keys, goal_keys=self.goal_key, dim=1)
+    self.cnn_keys = self.get_keys(shapes=shapes, keys=cnn_keys, goal_key=self.goal_key, dim=3)
+    self.mlp_keys =  self.get_keys(shapes=shapes, keys=mlp_keys, goal_key=self.goal_key, dim=1)
     print('Encoder CNN inputs:', list(self.cnn_keys))
     print('Encoder MLP inputs:', list(self.mlp_keys))
     self._act = get_act(act)
@@ -641,9 +641,10 @@ class Decoder(Module):
       image_dist='mse', **kwargs):
     super().__init__()
     self._embed_dim = embed_dim
+    self._shapes = shapes
     self.goal_key = kwargs.get('goal',None)
-    self.cnn_keys = self.get_keys(shapes=shapes, keys=cnn_keys, goal_keys=self.goal_key, dim=3)
-    self.mlp_keys =  self.get_keys(shapes=shapes, keys=mlp_keys, goal_keys=self.goal_key, dim=1)
+    self.cnn_keys = self.get_keys(shapes=shapes, keys=cnn_keys, goal_key=self.goal_key, dim=3)
+    self.mlp_keys =  self.get_keys(shapes=shapes, keys=mlp_keys, goal_key=self.goal_key, dim=1)
     print('Decoder CNN outputs:', list(self.cnn_keys))
     print('Decoder MLP outputs:', list(self.mlp_keys))
     self._act = get_act(act)

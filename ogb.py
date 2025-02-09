@@ -80,7 +80,7 @@ class Workspace:
                                 is_first = gym.spaces.Box(low=0, high=1, shape = (), dtype=bool),
                                 is_last = gym.spaces.Box(low=0, high=1, shape = (), dtype=bool),
                                 is_terminal = gym.spaces.Box(low=0, high=1, shape = (), dtype=bool),
-                                observation_goal = gym.spaces.Box(low=0, high=255, shape=(c, h, w), dtype=np.uint8),
+                                goal = gym.spaces.Box(low=0, high=255, shape=(c, h, w), dtype=np.uint8),
                                 )
         action_space = self.train_env.action_space
         data_specs = (

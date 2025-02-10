@@ -13,7 +13,7 @@ num_train_frames: 200_010
 num_seed_frames: 400
 # eval
 eval_every_frames: 5_000
-eval_modality: null
+eval_modality: task
 num_eval_episodes: 10
 # snapshot
 snapshot_dir: ../../../models/${obs_type}/${task}/${agent.name}/${seed}

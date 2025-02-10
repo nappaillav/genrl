@@ -8,14 +8,14 @@ defaults:
 
 label: default
 # task settings
-task: visual-antmaze-medium-stitch-v0
+task: visual-antmaze-medium-navigate-v0
 # train settings
 # task: visual-humanoidmaze-medium-navigate-v0
 num_train_frames: 200_010
 num_seed_frames: 400
 # eval
-eval_every_frames: 5_000
-eval_modality: null
+eval_every_frames: 1000
+eval_modality: task
 num_eval_episodes: 10
 # snapshot
 snapshot_dir: ../../models/${obs_type}/${task}/${agent.name}/${seed}

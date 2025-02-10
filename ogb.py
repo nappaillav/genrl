@@ -37,17 +37,22 @@ def make_dreamer_agent(obs_space, action_spec, cur_config, cfg):
         del cur_config.agent
     return hydra.utils.instantiate(cfg, cfg=cur_config, obs_space=obs_space, act_spec=action_spec)
 
-# class ChannelFirstWrapper(gym.ObservationWrapper):
-#     def __init__(self, env):
-#         super().__init__(env)
-#         h, w, c = env.observation_space.shape
-#         self.observation_space = gym.spaces.Box(low=0, 
-#                                                 high=255, 
-#                                                 shape=(c, h, w),
-#                                                 dtype=np.uint8
-#                                                 )
-#     def observation(self, observation):
-#         return np.transpose(observation, (2, 0, 1))
+def flatten(d, parent_key='', sep='.'):
+    """Flatten a dictionary."""
+    items = []
+    for k, v in d.items():
+        new_key = parent_key + sep + k if parent_key else k
+        if hasattr(v, 'items'):
+            items.extend(flatten(v, new_key, sep=sep).items())
+        else:
+            items.append((new_key, v))
+    return dict(items)
+
+
+def add_to(dict_of_lists, single_dict):
+    """Append values to the corresponding lists in the dictionary."""
+    for k, v in single_dict.items():
+        dict_of_lists[k].append(v)
 
 def make_env(env_name, **env_kwargs):
     return ogbench.make_env_and_datasets(env_name, **env_kwargs)
@@ -229,65 +234,152 @@ class Workspace:
             self._replay_iter = iter(self.replay_loader)
         return self._replay_iter
 
-    def eval(self):
+    def evaluate(self, eval_tasks = None, eval_episodes=10, video_episodes=0, video_frame_skip=3, eval_gaussian=None):
+        import tqdm
+        renders = []
+        eval_metrics = {}
+        overall_metrics = defaultdict(list)
+        task_infos = self.eval_env.unwrapped.task_infos if hasattr(self.eval_env.unwrapped, 'task_infos') else self.eval_env.task_infos
+        num_tasks = eval_tasks if eval_tasks is not None else len(task_infos)
+        for task_id in tqdm.trange(1, num_tasks + 1):
+            task_name = task_infos[task_id - 1]['task_name']
+            eval_info, trajs, cur_renders = self._evaluate_fn(
+                task_id=task_id,
+                num_eval_episodes=eval_episodes,
+                num_video_episodes=video_episodes,
+                video_frame_skip=video_frame_skip,
+                eval_gaussian=eval_gaussian,
+            )
+            renders.extend(cur_renders)
+            metric_names = ['success']
+            eval_metrics.update(
+                {f'{task_name}_{k}': v for k, v in eval_info.items() if k in metric_names}
+            )
+            for k, v in eval_info.items():
+                if k in metric_names:
+                    overall_metrics[k].append(v)
+        for k, v in overall_metrics.items():
+            eval_metrics[f'overall_{k}'] = np.mean(v)
+        
+        # if self.global_step > 0 and self.global_frame % self.cfg.log_episodes_every_frames == 0:
+        #     # B, T, C, H, W = video.shape
+        #     videos = {'best_episode' : np.stack(best_episode['observation'], axis=0),
+        #             'worst_episode' : np.stack(worst_episode['observation'], axis=0),}
+        #     self.logger.log_visual(videos, self.global_frame)
+        
+        # with self.logger.log_and_dump_ctx(self.global_frame, ty='eval') as log:
+        #     log('episode_reward', np.mean(episode_reward))
+        #     log('episode_length', step * self.cfg.action_repeat)
+        #     log('episode', self.global_episode)
+        #     log('step', self.global_step)
+        
+        self.logger.log_metrics(eval_metrics, self.global_frame, ty='eval')
+
+        return eval_metrics
+
+    def _evaluate_fn(self,
+        task_id=None,
+        num_eval_episodes=50,
+        num_video_episodes=0,
+        video_frame_skip=3,
+        eval_temperature=0,
+        eval_gaussian=None,
+    ):
+        """Evaluate the agent in the environment.
+
+        Args:
+            task_id: Task ID to be passed to the environment.
+            num_eval_episodes: Number of episodes to evaluate the agent.
+            num_video_episodes: Number of episodes to render. These episodes are not included in the statistics.
+            video_frame_skip: Number of frames to skip between renders.
+            eval_temperature: Action sampling temperature.
+            eval_gaussian: Standard deviation of the Gaussian noise to add to the actions.
+
+        Returns:
+            A tuple containing the statistics, trajectories, and rendered videos.
         """
-        This will be re-written according to the OGbench test 
-        OPTION 1 : Validate using the Validation data 
-        Option 2 : Test in the environment, these env give 
-        """
-        import envs.main as envs
-        eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
-        episode_reward = []
-        while eval_until_episode(len(episode_reward)):
-            if len(episode_reward) > 0 and self.global_step == 0:
-                return
-            episode_reward.append(0)
-            step, episode = 0, defaultdict(list)
-            meta = self.agent.init_meta()
-            time_step, dreamer_obs = self.eval_env.reset()
-            data = dreamer_obs
-            if 'clip_video' in data:
-                del data['clip_video']
-            self.eval_storage.add(data, meta) 
+        # actor_fn = supply_rng(agent.sample_actions, rng=jax.random.PRNGKey(np.random.randint(0, 2**32)))
+        actor = self.agent
+        trajs = []
+        stats = defaultdict(list)
+        import tqdm
+        renders = []
+        for i in tqdm.trange(num_eval_episodes + num_video_episodes):
+            traj = defaultdict(list)
+            should_render = i >= num_eval_episodes
+
+            observation, info = self.eval_env.reset(options=dict(task_id=task_id, render_goal=should_render))
+            goal = info.get('goal')
+            goal = goal.transpose(2, 0, 1).copy()
+            goal_frame = info.get('goal_rendered') if should_render else None
+            dreamer_obs = {
+                    "reward": 0.0,
+                    "is_first": True,
+                    "is_last": False,  # will be handled by timelimit wrapper
+                    "is_terminal": False,  # will be handled by per_episode function
+                    "observation": observation.transpose(2, 0, 1).copy(),
+                    "goal": goal,
+                    # 'action' : action,
+                    'discount' : 1
+                }
+            done = False
+            step = 0
+            render = []
             agent_state = None
-            while not time_step.last():
+            meta = self.agent.init_meta()
+            while not done:
+                # action = actor_fn(observations=observation, goals=goal)
                 with torch.no_grad(), utils.eval_mode(self.agent):
                     action, agent_state = self.agent.act(dreamer_obs, 
                                                 meta,
                                                 self.global_step,
                                                 eval_mode=True,
                                                 state=agent_state)
-                time_step, dreamer_obs = self.eval_env.step(action)
-                for k in dreamer_obs:
-                    episode[k].append(dreamer_obs[k])
-                episode_reward[-1] += time_step.reward
-                if time_step.last():
-                    if episode_reward[-1] == np.max(episode_reward):
-                        best_episode = {**episode}
-                    if episode_reward[-1] == np.min(episode_reward):
-                        worst_episode = {**episode}
-                data = dreamer_obs
-                if 'clip_video' in data:
-                    del data['clip_video']
-                self.eval_storage.add(data, meta) 
+                # time_step, dreamer_obs = self.eval_env.step(action)
+                # if not config.get('discrete'):
+                if eval_gaussian is not None:
+                    action = np.random.normal(action, eval_gaussian)
+                action = np.clip(action, -1, 1)
+
+                next_observation, reward, terminated, truncated, info = self.eval_env.step(action)
+                done = terminated or truncated
                 step += 1
 
-        if self.global_step > 0 and self.global_frame % self.cfg.log_episodes_every_frames == 0:
-            # B, T, C, H, W = video.shape
-            videos = {'best_episode' : np.stack(best_episode['observation'], axis=0),
-                    'worst_episode' : np.stack(worst_episode['observation'], axis=0),}
-            self.logger.log_visual(videos, self.global_frame)
+                if should_render and (step % video_frame_skip == 0 or done):
+                    frame = self.eval_env.render().copy()
+                    if goal_frame is not None:
+                        render.append(np.concatenate([goal_frame, frame], axis=0))
+                    else:
+                        render.append(frame)
 
-        with self.logger.log_and_dump_ctx(self.global_frame, ty='eval') as log:
-            log('episode_reward', np.mean(episode_reward))
-            log('episode_length', step * self.cfg.action_repeat)
-            log('episode', self.global_episode)
-            log('step', self.global_step)
+                observation = next_observation
+                dreamer_obs = {
+                    "reward": 0.0,
+                    "is_first": False,
+                    "is_last": truncated,  # will be handled by timelimit wrapper
+                    "is_terminal": done,  # will be handled by per_episode function
+                    "observation": observation.transpose(2, 0, 1).copy(),
+                    "goal": goal,
+                    # 'action' : action,
+                    'discount' : 1
+                }
+
+            add_to(stats, flatten(info))
+
+            if i < num_eval_episodes:
+                continue
+            else:
+                renders.append(np.array(render))
+
+        for k, v in stats.items():
+            stats[k] = np.mean(v)
+
+        return stats, trajs, renders
 
     def eval_imag_behavior(self,):
         self.agent._backup_acting_behavior = self.agent._acting_behavior
         self.agent._acting_behavior = self.agent._imag_behavior
-        self.eval()
+        self.evaluate()
         self.agent._acting_behavior = self.agent._backup_acting_behavior
 
     def train(self):
@@ -300,9 +392,9 @@ class Workspace:
         metrics = None
         while train_until_step(self.global_step):
             # try to evaluate
-            if eval_every_step(self.global_step):
+            if eval_every_step(self.global_step+1):
                 if self.cfg.eval_modality == 'task':
-                    self.eval()
+                    self.evaluate()
                 if self.cfg.eval_modality == 'task_imag':
                     self.eval_imag_behavior()
                 if self.cfg.eval_modality == 'from_text':

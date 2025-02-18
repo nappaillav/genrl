@@ -563,7 +563,7 @@ class Encoder(Module):
     super().__init__()
     self.shapes = shapes
     self.goal_key = kwargs.get('goal',None)
-    self.cnn_keys = self.get_keys(shapes=shapes, keys=cnn_keys, goal_key=self.goal_key, dim=3)
+    self.cnn_keys = self.get_keys(shapes=shapes, keys=cnn_keys, goal_key=None, dim=3)
     self.mlp_keys =  self.get_keys(shapes=shapes, keys=mlp_keys, goal_key=self.goal_key, dim=1)
     print('Encoder CNN inputs:', list(self.cnn_keys))
     print('Encoder MLP inputs:', list(self.mlp_keys))
@@ -606,19 +606,23 @@ class Encoder(Module):
     else:
       return [k for k, v in shapes.items() if re.match(keys, k) and len(v) == dim]
   
-  def forward(self, data):
-    key, shape = list(self.shapes.items())[0]
+  def forward(self, data, goal_encode=False):
+    key, shape = list(self.shapes.items())[0] if not goal_encode else list(self.shapes.items())[-1] 
     batch_dims = data[key].shape[:-len(shape)]
     data = {
         k: v.reshape((-1,) + tuple(v.shape)[len(batch_dims):])
         for k, v in data.items()}
-    outputs = []
-    if self.cnn_keys:
-      outputs.append(self._cnn({k: data[k] for k in self.cnn_keys}))
-    if self.mlp_keys:
-      outputs.append(self._mlp({k: data[k] for k in self.mlp_keys}))
-    output = torch.cat(outputs, -1)
-    return output.reshape(batch_dims + output.shape[1:])
+    if goal_encode:
+      output = self._cnn({self.goal_key: data[self.goal_key]})
+      return output.reshape(batch_dims + output.shape[1:])
+    else:
+      outputs = []
+      if self.cnn_keys:
+        outputs.append(self._cnn({k: data[k] for k in self.cnn_keys}))
+      if self.mlp_keys:
+        outputs.append(self._mlp({k: data[k] for k in self.mlp_keys}))
+      output = torch.cat(outputs, -1)
+      return output.reshape(batch_dims + output.shape[1:])
 
   def _cnn(self, data):
     x = torch.cat(list(data.values()), -1)

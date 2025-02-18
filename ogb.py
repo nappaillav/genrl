@@ -126,6 +126,7 @@ class Workspace:
                 replay_dir = found_path / 'code' / 'buffer'
             else:
                 replay_dir = Path(cfg.replay_load_dir)
+                eval_replay_dir = Path(cfg.replay_eval_dir) if cfg.replay_eval_dir else None
 
             # create data storage
             self.replay_storage = OGReplayBuffer(data_specs, [],
@@ -205,11 +206,16 @@ class Workspace:
             dict(reward=gym.spaces.Box(low=0, high=1, shape = (1,), dtype=np.float32)),
             dict(discount=gym.spaces.Box(low=0, high=1, shape = (1,), dtype=np.float32)),
         )
+
         self.eval_storage = OGReplayBuffer(eval_specs, {},
-                                                self.workdir / 'eval_buffer',
+                                                # self.workdir / 'eval_buffer',
+                                                eval_replay_dir,
                                                 length=cfg.batch_length, **cfg.replay,
                                                 device=cfg.device, ignore_extra_keys=True,)
         ##################### TODO : LOAD VAL DATA FOR evaluation #######################
+        self.eval_replay_loader = make_replay_loader(self.eval_storage,
+                                                    cfg.batch_size,)
+        self._eval_replay_iter = None
         self.eval_storage._minlen = 1
 
         self.timer = utils.Timer()
@@ -229,18 +235,25 @@ class Workspace:
         return self.global_step * self.cfg.action_repeat
 
     @property
-    def replay_iter(self):
+    def replay_iter(self, eval=False):
         if self._replay_iter is None:
             self._replay_iter = iter(self.replay_loader)
         return self._replay_iter
 
-    def evaluate(self, eval_tasks = None, eval_episodes=10, video_episodes=0, video_frame_skip=3, eval_gaussian=None):
+    @property
+    def eval_replay_iter(self):
+        if self._eval_replay_iter is None:
+            self._eval_replay_iter = iter(self.eval_replay_loader)
+        return self._eval_replay_iter
+    
+    def evaluate(self, eval_tasks = None, eval_episodes=3, video_episodes=0, video_frame_skip=3, eval_gaussian=None):
         import tqdm
         renders = []
         eval_metrics = {}
         overall_metrics = defaultdict(list)
         task_infos = self.eval_env.unwrapped.task_infos if hasattr(self.eval_env.unwrapped, 'task_infos') else self.eval_env.task_infos
         num_tasks = eval_tasks if eval_tasks is not None else len(task_infos)
+        num_tasks = 1
         for task_id in tqdm.trange(1, num_tasks + 1):
             task_name = task_infos[task_id - 1]['task_name']
             eval_info, trajs, cur_renders = self._evaluate_fn(
@@ -273,8 +286,12 @@ class Workspace:
         #     log('episode', self.global_episode)
         #     log('step', self.global_step)
         
-        self.logger.log_metrics(eval_metrics, self.global_frame, ty='eval')
-
+        self.logger.log_metrics(eval_metrics, self.global_frame, ty='eval') # Tensorboard ?
+        # with self.logger.log_and_dump_ctx(self.global_frame, ty='eval') as log:
+        #     # log('fps', self.cfg.log_every_frames / elapsed_time)
+        #     log('step', self.global_step)
+        #     if 'model_loss' in metrics: 
+        #         log('episode_reward', metrics['model_loss'].item())
         return eval_metrics
 
     def _evaluate_fn(self,
@@ -318,7 +335,7 @@ class Workspace:
                     "is_last": False,  # will be handled by timelimit wrapper
                     "is_terminal": False,  # will be handled by per_episode function
                     "observation": observation.transpose(2, 0, 1).copy(),
-                    "goal": goal,
+                    "goal": goal, # can be removed 
                     # 'action' : action,
                     'discount' : 1
                 }
@@ -331,7 +348,7 @@ class Workspace:
                 # action = actor_fn(observations=observation, goals=goal)
                 with torch.no_grad(), utils.eval_mode(self.agent):
                     action, agent_state = self.agent.act(dreamer_obs, 
-                                                meta,
+                                                meta, # goal 
                                                 self.global_step,
                                                 eval_mode=True,
                                                 state=agent_state)
@@ -390,9 +407,10 @@ class Workspace:
         should_save_model = utils.Every(self.cfg.save_every_frames, 1)
         should_log_visual = utils.Every(self.cfg.visual_every_frames, 1)
         metrics = None
+        eval_metrics = None
         while train_until_step(self.global_step):
             # try to evaluate
-            if eval_every_step(self.global_step+1):
+            if eval_every_step(self.global_step):
                 if self.cfg.eval_modality == 'task':
                     self.evaluate()
                 if self.cfg.eval_modality == 'task_imag':
@@ -400,7 +418,11 @@ class Workspace:
                 if self.cfg.eval_modality == 'from_text':
                     self.logger.log('eval_total_time', self.timer.total_time(), self.global_frame)
                     self.eval_from_text()
-
+                if self.cfg.eval_modality == 'data':
+                    with torch.no_grad(), utils.eval_mode(self.agent):
+                        batch_data = next(self.eval_replay_iter)
+                        eval_metrics = self.agent.act(batch_data, None, self.global_step, eval_mode=True, state=None, batch=True)
+                        self.logger.log_metrics(eval_metrics, self.global_frame, ty='eval')
             if self.cfg.train_from_data:
                 # Sampling data
                 batch_data = next(self.replay_iter)
@@ -408,6 +430,8 @@ class Workspace:
                 if self.cfg.train_world_model:
                     # print(f"Update : {self.global_step}")
                     state, outputs, metrics = self.agent.update_wm(batch_data, self.global_step)
+                    # get the goal encoded information
+                    start, metrics = self.agent.update_acting_behavior(state, outputs, metrics, batch_data)
                 else:
                     with torch.no_grad():
                         outputs, metrics = self.agent.wm.observe_data(batch_data,)

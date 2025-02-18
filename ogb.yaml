@@ -1,5 +1,5 @@
 defaults:
-  - agent: dreamer
+  - agent: gcdreamer # gcdreamer
   - conf/defaults: dreamer_v3
   - conf/env: gc
   - override hydra/launcher: submitit_local
@@ -14,18 +14,18 @@ task: visual-antmaze-medium-navigate-v0
 num_train_frames: 200_010
 num_seed_frames: 400
 # eval
-eval_every_frames: 1000
-eval_modality: task
+eval_every_frames: 5000
+eval_modality: data #task # null
 num_eval_episodes: 10
 # snapshot
-snapshot_dir: ../../models/${obs_type}/${task}/${agent.name}/${seed}
+snapshot_dir: ./models/${obs_type}/${task}/${agent.name}/${seed}
 snapshot_every_frames: 50_000
-save_every_frames: 1000
+save_every_frames: 5000
 # misc
 seed: 1
 device: cuda:0
 use_tb: true
-use_wandb: true
+use_wandb: false
 
 # Clip stuff
 viclip_encode: false # dreamer+ogbench
@@ -61,7 +61,8 @@ seed_snapshot: null
 agent_name_snapshot: null
 
 snapshot_load_dir: null
-replay_load_dir: /home/wtc/sai/genrl/data/ogbench/visual-antmaze-medium-navigate
+replay_load_dir: /home/wtc/sai/genrl/data/ogbench/visual-antmaze-medium-navigate/train
+replay_eval_dir: /home/wtc/sai/genrl/data/ogbench/visual-antmaze-medium-navigate/val
 
 # 
 snapshot_step: null

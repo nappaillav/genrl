@@ -307,7 +307,8 @@ class OGReplayBuffer(ReplayBuffer):
       b_indices = np.random.randint(0, sequences, size=batch_size)
       t_indices = np.random.randint(np.zeros(batch_size) + self._min_t_sampling, self._episode_lens[b_indices]-batch_length+1, size=batch_size)
       t_ranges = np.repeat( np.expand_dims(np.arange(0, batch_length,), 0), batch_size, axis=0) + np.expand_dims(t_indices, 1)
-      g_indices = np.repeat(t_ranges[:, -1], batch_length, axis=0).reshape(batch_size, batch_length)
+      # g_indices = np.repeat(t_ranges[:, -1], batch_length, axis=0).reshape(batch_size, batch_length)
+      g_indices = t_ranges[:, -1]
       chunk = {}
       for k in self._complete_eps:
         if k == 'goal':

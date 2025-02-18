@@ -7,7 +7,7 @@ from collections import OrderedDict
 import numpy as np
 
 from tools.genrl_utils import *
-
+from agent.policy import BCPolicy
 def stop_gradient(x):
   return x.detach()
 
@@ -29,39 +29,86 @@ class DreamerAgent(Module):
     self._use_amp = (cfg.precision == 16)
     self.device = cfg.device
     self.act_dim = act_spec.shape[0]
+    self.gc = self.cfg.goal_condition
+    self.actor_policy = 'bc'
     self.wm = WorldModel(cfg, obs_space, self.act_dim,)
     self.instantiate_acting_behavior()
-
+    
     self.to(cfg.device)
     self.requires_grad_(requires_grad=False)
 
   def instantiate_acting_behavior(self,):
-    self._acting_behavior = ActorCritic(self.cfg, self.act_spec, self.wm.inp_size).to(self.device)
-    
-  def act(self, obs, meta, step, eval_mode, state):
+    if self.gc:
+      if self.actor_policy == 'actor_critic':
+        self._acting_behavior = CustomActorCritic(config=self.cfg, act_spec=self.act_spec, feat_size=self.wm.inp_size, embed_dim=self.wm.embed_dim, goal_condition=self.gc).to(self.device)
+      elif self.actor_policy == 'bc':
+        self._acting_behavior = BCPolicy(config=self.cfg, act_spec=self.act_spec, feat_size=self.wm.inp_size, embed_dim=self.wm.embed_dim, goal_condition=self.gc).to(self.device)
+    else:
+      self._acting_behavior = ActorCritic(self.cfg, self.act_spec, self.wm.inp_size).to(self.device)
+
+  def act(self, obs, meta, step, eval_mode, state, batch=False, compute_loss=False):
     if self.cfg.only_random_actions:
       return np.random.uniform(-1, 1, self.act_dim,).astype(self.act_spec.dtype), (None, None)
-    obs = {k : torch.as_tensor(np.copy(v), device=self.device).unsqueeze(0) for k, v in obs.items()}
+    
+    if not batch:
+      obs = {k : torch.as_tensor(np.copy(v), device=self.device).unsqueeze(0) for k, v in obs.items()}
+    
     if state is None:
       latent = self.wm.rssm.initial(len(obs['reward']))
       action = torch.zeros((len(obs['reward']),) + self.act_spec.shape, device=self.device)
     else:
       latent, action = state
-    embed = self.wm.encoder(self.wm.preprocess(obs))
+    obs = self.wm.preprocess(obs)  
+    embed = self.wm.encoder(obs)
+    if self.gc:
+      task_cond = self.wm.encoder(obs, goal_encode=True)
     should_sample = (not eval_mode) or (not self.cfg.eval_state_mean)
-    latent, _ = self.wm.rssm.obs_step(latent, action, embed, obs['is_first'], should_sample)
-    feat = self.wm.rssm.get_feat(latent)
-    if eval_mode:
-      actor = self._acting_behavior.actor(feat)
-      try:
-        action = actor.mean 
-      except:
-        action = actor._mean
+    if batch:
+      T = embed.shape[1]
+      mse, lp = 0.0, 0.0
+      for timestep in range(T-1):
+        latent, _ = self.wm.rssm.obs_step(latent, action, 
+                                          embed[:, timestep], 
+                                          obs['is_first'][:, timestep], 
+                                          should_sample)
+        feat = self.wm.rssm.get_feat(latent)
+        feat = torch.cat([feat, task_cond], -1) if self.gc else feat
+        if eval_mode:
+          actor = self._acting_behavior.actor(feat) # Goal encoder 
+          try:
+            action = actor.mean 
+          except:
+            action = actor._mean
+        else:
+          actor = self._acting_behavior.actor(feat)
+          action = actor.sample()
+        new_state = (latent, action)
+        mse +=  ((obs['action'][:, timestep] - action)**2).mean().item()
+        lp +=actor.log_prob(action).mean().item()
+      return {"Actor_MSE": mse/(T-1), "Actor_logprob":lp/(T-1)}
     else:
-      actor = self._acting_behavior.actor(feat)
-      action = actor.sample()
-    new_state = (latent, action)
+
+      latent, _ = self.wm.rssm.obs_step(latent, action, embed, obs['is_first'], should_sample)
+      feat = self.wm.rssm.get_feat(latent)
+      feat = torch.cat([feat, task_cond], -1) if self.gc else feat
+      if eval_mode:
+        actor = self._acting_behavior.actor(feat) # Goal encoder 
+        try:
+          action = actor.mean 
+        except:
+          action = actor._mean
+      else:
+        actor = self._acting_behavior.actor(feat)
+        action = actor.sample()
+      new_state = (latent, action)
+    # if compute_loss:
+    #   # MSE loss 
+    #   # (B X T-1 X action_dim)
+    #   mse =  ((obs[action][:, :-1, :] - action[:, :-1, :])**2).mean().item()
+    #   log_prob = actor.log_prob(action)
     return action.cpu().numpy()[0], new_state
+
+
 
   def update_wm(self, data, step):
     metrics = {}
@@ -71,24 +118,38 @@ class DreamerAgent(Module):
     return state, outputs, metrics
 
   def update_acting_behavior(self, state=None, outputs=None, metrics={}, data=None, reward_fn=None):
+    task_cond = None
     if self.cfg.only_random_actions:
       return {}, metrics
     if outputs is not None:
       post = outputs['post']
       is_terminal = outputs['is_terminal']
+      if self.gc:
+        # goal_emb = self.wm.encoder(data, goal_encode=False).unsqueeze(1).repeat(1, self.cfg.batch_length, 1)
+        # start = {'goal':stop_gradient(goal_emb)}
+        feat_dim = outputs['goal_embed'].shape[-1]
+        task_cond = outputs['goal_embed'].unsqueeze(1).repeat(1, self.cfg.batch_length, 1).reshape(-1, feat_dim)
     else:
       data = self.wm.preprocess(data)
       embed = self.wm.encoder(data)
+      if self.gc:
+        goal_emb = self.wm.encoder(data, goal_encode=True).unsqueeze(1).repeat(1, self.cfg.batch_length, 1)
+        # start = {'goal':stop_gradient(goal_emb)}
+        task_cond = stop_gradient(goal_emb)
       post, _ = self.wm.rssm.observe(
           embed, data['action'], data['is_first'])
       is_terminal = data['is_terminal']
-    #
+
     start = {k: stop_gradient(v) for k,v in post.items()}
     if reward_fn is None:
       acting_reward_fn = lambda seq: globals()[self.cfg.acting_reward_fn](self, seq) #.mode()
     else:
       acting_reward_fn = lambda seq: reward_fn(self, seq) #.mode()
-    metrics.update(self._acting_behavior.update(self.wm, start, is_terminal, acting_reward_fn))
+    if self.actor_policy == 'actor_critic':
+      metrics.update(self._acting_behavior.update(self.wm, start, is_terminal, acting_reward_fn, task_cond=task_cond))
+    elif self.actor_policy == 'bc':
+      metrics.update(self._acting_behavior.update(self.wm, start, data, task_cond=task_cond))
+
     return start, metrics
 
   def update(self, data, step):
@@ -118,7 +179,7 @@ class DreamerAgent(Module):
     return meta
 
 class WorldModel(Module):
-  def __init__(self, config, obs_space, act_dim,):
+  def __init__(self, config, obs_space, act_dim, **kwargs):
     super().__init__()
     shapes = {k: tuple(v.shape) for k, v in obs_space.items()}
     self.shapes = shapes
@@ -185,7 +246,14 @@ class WorldModel(Module):
       detached_loss, metrics = self.update_additional_detached_modules(data, outputs, metrics)
     self.eval()
     return state, outputs, metrics
-
+  
+  def eval_loss(self, data, state=None):
+    with torch.cuda.amp.autocast(enabled=self._use_amp):
+      model_loss, state, outputs, metrics = self.loss(data, state)
+      model_loss, metrics = self.update_additional_e2e_modules(data, outputs, model_loss, metrics)
+    metrics.update(self.model_opt(model_loss, self.parameters())) 
+    return state, outputs, metrics
+  
   def update_additional_detached_modules(self, data, outputs, metrics):
     # additional detached losses
     detached_loss = 0
@@ -219,6 +287,8 @@ class WorldModel(Module):
   def loss(self, data, state=None):
     data = self.preprocess(data)
     embed = self.encoder(data)
+    if self.cfg.goal_condition:
+      goal_embed = stop_gradient(self.encoder(data, goal_encode=True)) # STOP Goal gradients here
     post, prior = self.rssm.observe(
         embed, data['action'], data['is_first'], state)
     kl_loss, kl_value = self.rssm.kl_loss(post, prior, **self.cfg.kl)
@@ -243,7 +313,7 @@ class WorldModel(Module):
         self.cfg.loss_scales.get(k, 1.0) * v for k, v in losses.items())
     outs = dict(
         embed=embed, feat=feat, post=post,
-        prior=prior, likes=likes, kl=kl_value)
+        prior=prior, likes=likes, kl=kl_value, goal_embed=goal_embed)
     metrics = {f'{name}_loss': value for name, value in losses.items()}
     metrics['model_kl'] = kl_value.mean()
     metrics['prior_ent'] = self.rssm.get_dist(prior).entropy().mean()
@@ -252,6 +322,7 @@ class WorldModel(Module):
     return model_loss, last_state, outs, metrics
 
   def imagine(self, policy, start, is_terminal, horizon, task_cond=None, eval_policy=False):
+    # the seq + task 
     flatten = lambda x: x.reshape([-1] + list(x.shape[2:]))
     start = {k: flatten(v) for k, v in start.items()}
     start['feat'] = self.rssm.get_feat(start)
@@ -328,7 +399,9 @@ class ActorCritic(Module):
     self.act_spec = act_spec
     self._use_amp = (config.precision == 16)
     self.device = config.device
-    
+    # self.embed_dim = embed_dim 
+    # self.goal_encoder = goal_encoder
+
     if getattr(self.cfg, 'discrete_actions', False):
       self.cfg.actor.dist = 'onehot'
 
@@ -441,6 +514,178 @@ class ActorCritic(Module):
     reward = seq['reward'] 
     disc = seq['discount'] 
     value = self._target_critic(seq['feat']).mean 
+    # Skipping last time step because it is used for bootstrapping.
+    target = common.lambda_return(
+        reward[:-1], value[:-1], disc[:-1],
+        bootstrap=value[-1],
+        lambda_=self.cfg.discount_lambda,
+        axis=0)
+    metrics = {}
+    metrics['critic_slow'] = value.mean()
+    metrics['critic_target'] = target.mean()
+    return target, metrics, value[:-1]
+
+  def update_slow_target(self):
+    if self.cfg.slow_target:
+      if self._updates % self.cfg.slow_target_update == 0:
+        mix = 1.0 if self._updates == 0 else float(
+            self.cfg.slow_target_fraction)
+        for s, d in zip(self.critic.parameters(), self._target_critic.parameters()):
+          d.data = mix * s.data + (1 - mix) * d.data
+      self._updates += 1 
+
+class CustomActorCritic(Module):
+  def __init__(self, config, act_spec, feat_size, name='', embed_dim=1536, goal_condition=None):
+    super().__init__()
+    self.name = name
+    self.cfg = config
+    self.act_spec = act_spec
+    self._use_amp = (config.precision == 16)
+    self.device = config.device
+    self.embed_dim = embed_dim
+    self.gc = goal_condition
+    inp_size = feat_size + embed_dim if goal_condition else 0
+    
+    if getattr(self.cfg, 'discrete_actions', False):
+      self.cfg.actor.dist = 'onehot'
+
+    self.actor_grad = getattr(self.cfg, f'{self.name}_actor_grad'.strip('_'))
+    
+    inp_size = feat_size + embed_dim
+  
+    self.actor = common.MLP(inp_size, act_spec.shape[0], **self.cfg.actor)
+    self.critic = common.MLP(inp_size, (1,), **self.cfg.critic)
+    if self.cfg.slow_target:
+      self._target_critic = common.MLP(inp_size, (1,), **self.cfg.critic)
+      self._updates = 0 # tf.Variable(0, tf.int64)
+    else:
+      self._target_critic = self.critic
+    self.actor_opt = common.Optimizer('actor', self.actor.parameters(), **self.cfg.actor_opt, use_amp=self._use_amp)
+    self.critic_opt = common.Optimizer('critic', self.critic.parameters(), **self.cfg.critic_opt, use_amp=self._use_amp)
+    
+    if self.cfg.reward_ema:
+        # register ema_vals to nn.Module for enabling torch.save and torch.load
+        self.register_buffer("ema_vals", torch.zeros((2,)).to(self.device))
+        self.reward_ema = common.RewardEMA(device=self.device)
+        self.rewnorm = common.StreamNorm(momentum=1, scale=1.0, device=self.device)
+    else:
+        self.rewnorm = common.StreamNorm(**self.cfg.reward_norm, device=self.device)
+
+    # zero init
+    with torch.no_grad():
+      for p in self.critic._out.parameters():
+        p.data = p.data * 0
+    # hard copy critic initial params
+    for s, d in zip(self.critic.parameters(), self._target_critic.parameters()):
+      d.data = s.data
+    #
+
+
+  def update(self, world_model, start, is_terminal, reward_fn, task_cond=None):
+    metrics = {}
+    hor = self.cfg.imag_horizon
+    # The weights are is_terminal flags for the imagination start states.
+    # Technically, they should multiply the losses from the second trajectory
+    # step onwards, which is the first imagined step. However, we are not
+    # training the action that led into the first step anyway, so we can use
+    # them to scale the whole sequence.
+    with common.RequiresGrad(self.actor):
+      with torch.cuda.amp.autocast(enabled=self._use_amp):
+        # goal_emb = world_model.encoder() 
+        seq = world_model.imagine(self.actor, start, is_terminal, hor, task_cond=task_cond)
+        reward = reward_fn(seq)
+        seq['reward'], mets1 = self.rewnorm(reward)
+        mets1 = {f'reward_{k}': v for k, v in mets1.items()}
+        target, mets2, baseline = self.target(seq)
+        actor_loss, mets3 = self.actor_loss(seq, target, baseline)
+      metrics.update(self.actor_opt(actor_loss, self.actor.parameters()))
+    with common.RequiresGrad(self.critic):
+      with torch.cuda.amp.autocast(enabled=self._use_amp):
+        seq = {k: stop_gradient(v) for k,v in seq.items()}
+        critic_loss, mets4 = self.critic_loss(seq, target)
+      metrics.update(self.critic_opt(critic_loss, self.critic.parameters()))
+    metrics.update(**mets1, **mets2, **mets3, **mets4)
+    self.update_slow_target()  # Variables exist after first forward pass.
+    return { f'{self.name}_{k}'.strip('_') : v for k,v in metrics.items() }
+
+  def eval_loss(self, world_model, start, is_terminal, reward_fn, task_cond=None):
+    metrics = {}
+    hor = self.cfg.imag_horizon
+    # hor = 1
+    with torch.cuda.amp.autocast(enabled=self._use_amp):
+      # goal_emb = world_model.encoder() 
+      seq = world_model.imagine(self.actor, start, is_terminal, hor, task_cond=task_cond)
+      reward = reward_fn(seq)
+      seq['reward'], mets1 = self.rewnorm(reward)
+      mets1 = {f'reward_{k}': v for k, v in mets1.items()}
+      target, mets2, baseline = self.target(seq)
+      actor_loss, mets3 = self.actor_loss(seq, target, baseline)
+    
+    with torch.cuda.amp.autocast(enabled=self._use_amp):
+      seq = {k: stop_gradient(v) for k,v in seq.items()}
+      critic_loss, mets4 = self.critic_loss(seq, target)
+    
+    return { f'{self.name}_{k}'.strip('_') : v for k,v in metrics.items() }
+
+  def actor_loss(self, seq, target, baseline): #, step):
+    # Two state-actions are lost at the end of the trajectory, one for the boostrap
+    # value prediction and one because the corresponding action does not lead
+    # anywhere anymore. One target is lost at the start of the trajectory
+    # because the initial state comes from the replay buffer.
+    if self.gc:
+      inp = torch.cat([stop_gradient(seq['feat'][:-2]), seq['task'][:-2]], -1)
+      policy = self.actor(inp)
+    else:
+      policy = self.actor(stop_gradient(seq['feat'][:-2])) # actions are the ones in [1:-1]
+
+    metrics = {}
+    if self.cfg.reward_ema:
+      offset, scale = self.reward_ema(target, self.ema_vals)
+      normed_target = (target - offset) / scale
+      normed_baseline = (baseline - offset) / scale
+      # adv = normed_target - normed_baseline
+      metrics['normed_target_mean'] = normed_target.mean()
+      metrics['normed_target_std'] = normed_target.std()
+      metrics["reward_ema_005"] = self.ema_vals[0]
+      metrics["reward_ema_095"] = self.ema_vals[1]
+    else:
+      normed_target = target
+      normed_baseline = baseline
+    
+    if self.actor_grad == 'dynamics':
+      objective = normed_target[1:]
+    elif self.actor_grad == 'reinforce':
+      advantage = normed_target[1:] - normed_baseline[1:]
+      objective = policy.log_prob(stop_gradient(seq['action'][1:-1]))[:,:,None] * advantage
+    else:
+      raise NotImplementedError(self.actor_grad)
+    
+    ent = policy.entropy()[:,:,None]
+    ent_scale = self.cfg.actor_ent
+    objective += ent_scale * ent
+    metrics['actor_ent'] = ent.mean()
+    metrics['actor_ent_scale'] = ent_scale
+    
+    weight = stop_gradient(seq['weight'])
+    actor_loss = -(weight[:-2] * objective).mean() 
+    return actor_loss, metrics
+
+  def critic_loss(self, seq, target):
+    feat = seq['feat'][:-1] if not self.gc else torch.cat([seq['feat'][:-1], seq['task'][:-1]], -1) # here the features should be concat 
+    target = stop_gradient(target)
+    weight = stop_gradient(seq['weight'])
+    dist = self.critic(feat)
+    critic_loss = -(dist.log_prob(target)[:,:,None] * weight[:-1]).mean()
+    metrics = {'critic': dist.mean.mean() } 
+    return critic_loss, metrics
+
+  def target(self, seq):
+    reward = seq['reward'] 
+    disc = seq['discount']
+    if self.gc:
+      value = self._target_critic(torch.cat([seq['feat'], seq['task']], -1)).mean
+    else: 
+      value = self._target_critic(seq['feat']).mean 
     # Skipping last time step because it is used for bootstrapping.
     target = common.lambda_return(
         reward[:-1], value[:-1], disc[:-1],

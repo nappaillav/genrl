@@ -7,6 +7,12 @@ import io
 import pathlib
 import uuid
 import os
+import urllib.request
+import gymnasium
+from tqdm import tqdm
+
+DEFAULT_DATASET_DIR = '/home/wtc/sai/genrl/data/ogbench'
+DATASET_URL = 'https://rail.eecs.berkeley.edu/datasets/ogbench'
 
 def load_dataset(dataset_path, directory, ob_dtype=np.float32, action_dtype=np.float32, compact_dataset=False):
     
@@ -21,7 +27,7 @@ def load_dataset(dataset_path, directory, ob_dtype=np.float32, action_dtype=np.f
             else:
                 dtype = np.float32
             dataset[k] = file[k][...].astype(dtype, copy=False)
-    del file
+    
     pos = np.where(dataset['terminals'] == 1)[0]+1
     start = 0 
     trajectory = 0
@@ -77,15 +83,53 @@ def test_make_env(dataset_name):
             obs, reward, terminate, truncate, info = train_env.step(action)
         print('done')
 
+def download_datasets(dataset_names, dataset_dir=DEFAULT_DATASET_DIR):
+    """Download OGBench datasets.
+
+    Args:
+        dataset_names: List of dataset names to download.
+        dataset_dir: Directory to save the datasets.
+    """
+    # Make dataset directory.
+    dataset_dir = os.path.expanduser(dataset_dir)
+    os.makedirs(dataset_dir, exist_ok=True)
+
+    # Download datasets.
+    dataset_file_names = []
+    for dataset_name in dataset_names:
+        dataset_file_names.append(f'{dataset_name}.npz')
+        dataset_file_names.append(f'{dataset_name}-val.npz')
+    for dataset_file_name in dataset_file_names:
+        dataset_file_path = os.path.join(dataset_dir, dataset_file_name)
+        if not os.path.exists(dataset_file_path):
+            dataset_url = f'{DATASET_URL}/{dataset_file_name}'
+            print('Downloading dataset from:', dataset_url)
+            response = urllib.request.urlopen(dataset_url)
+            tmp_dataset_file_path = f'{dataset_file_path}.tmp'
+            with tqdm.wrapattr(
+                open(tmp_dataset_file_path, 'wb'),
+                'write',
+                miniters=1,
+                desc=dataset_url.split('/')[-1],
+                total=getattr(response, 'length', None),
+            ) as file:
+                for chunk in response:
+                    file.write(chunk)
+            os.rename(tmp_dataset_file_path, dataset_file_path)
+
 if __name__ == "__main__":
     
     # Make an environment and load datasets.
     dataset_name = 'visual-antmaze-medium-navigate-v0'
     # dataset_name = 'antmaze-large-navigate-v0' 
+    # download_datasets([dataset_name])
 
-
+    dataset = load_dataset(dataset_path='/home/wtc/sai/genrl/data/ogbench/visual-antmaze-medium-navigate-v0.npz', 
+                        directory='/home/wtc/sai/genrl/data/ogbench/visual-antmaze-medium-navigate/train',
+                        ob_dtype=np.uint8)
+    
     dataset = load_dataset(dataset_path='/home/wtc/sai/genrl/data/ogbench/visual-antmaze-medium-navigate-v0-val.npz', 
-                        directory='/home/wtc/sai/genrl/data/ogbench/visual-antmaze-medium-navigate',
+                        directory='/home/wtc/sai/genrl/data/ogbench/visual-antmaze-medium-navigate/val',
                         ob_dtype=np.uint8)
     
 

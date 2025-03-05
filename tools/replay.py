@@ -305,10 +305,17 @@ class OGReplayBuffer(ReplayBuffer):
       sequences, batch_size, batch_length = self._loaded_episodes, self.batch_size, self._length
       """Selects the trajectory, selects the start location and crops till the max_length"""
       b_indices = np.random.randint(0, sequences, size=batch_size)
-      t_indices = np.random.randint(np.zeros(batch_size) + self._min_t_sampling, self._episode_lens[b_indices]-batch_length+1, size=batch_size)
+      t_indices = np.random.randint(np.zeros(batch_size) + self._min_t_sampling, self._episode_lens[b_indices]-(2*batch_length)+1, size=batch_size)
       t_ranges = np.repeat( np.expand_dims(np.arange(0, batch_length,), 0), batch_size, axis=0) + np.expand_dims(t_indices, 1)
       # g_indices = np.repeat(t_ranges[:, -1], batch_length, axis=0).reshape(batch_size, batch_length)
-      g_indices = t_ranges[:, -1]
+      # g_indices = t_ranges[:, -1]
+      distances = np.random.uniform(0, 1, size=(batch_size, batch_length))
+      # 10% next state goals
+      final_pos = np.expand_dims(self._episode_lens[b_indices], axis=1) - 1
+
+      goal_pos = ((final_pos - t_ranges) * np.where(distances < 0.1, 0, distances)).astype(int) + t_ranges + 1
+      reward_g = (goal_pos - t_ranges) 
+      reward_g = np.where( reward_g < 20, reward_g, 0) / 20 # Should 
       chunk = {}
       for k in self._complete_eps:
         if k == 'goal':
@@ -321,7 +328,7 @@ class OGReplayBuffer(ReplayBuffer):
           chunk[k] = np.stack([self._complete_eps[k][b][t] for b,t in zip(b_indices, t_ranges)])
       # Goal observation
       # goal <- ['observation'][b][t_indices[:, -1]] --> last index
-      chunk['goal'] = np.stack([self._complete_eps['observation'][b][t] for b,t in zip(b_indices, g_indices)])
+      chunk['goal'] = np.stack([self._complete_eps['observation'][b][t] for b,t in zip(b_indices, goal_pos)])
       for k in chunk: 
         chunk[k] = torch.as_tensor(chunk[k], device=self.device)
       yield chunk

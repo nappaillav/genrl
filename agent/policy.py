@@ -39,11 +39,15 @@ class BCPolicy(Module):
     metrics = {}
     with common.RequiresGrad(self.actor):
         with torch.cuda.amp.autocast(enabled=self._use_amp):
-            action, entropy = self.OnestepBC(world_model, start, task_cond)
-            mse_loss = ((batch['action'].reshape(-1, action.shape[-1]) - action)**2).mean() 
-            actor_loss = mse_loss + self.cfg.actor_ent * entropy
+            # action, entropy = self.OnestepBC(world_model, start, task_cond)
+            action_dist = self.OnestepBC(world_model, start, task_cond)
+            actor_loss = -1 * action_dist.log_prob(batch['action'].reshape(-1, batch['action'].shape[-1])).mean()
+            # mse_loss = ((batch['action'].reshape(-1, action.shape[-1]) - action_dist.mean())**2).mean() 
+            # actor_loss = mse_loss + self.cfg.actor_ent * entropy
+
             metrics.update(self.actor_opt(actor_loss, self.actor.parameters()))
-            metrics.update({"Policy_MSE" : mse_loss.item(), "Policy_Entropy" : entropy.item()})   
+            # metrics.update({"Policy_MSE" : mse_loss.item()actor_loss, "Policy_Entropy" : entropy.item()})   
+            metrics.update({"Log Prob" : actor_loss.item()})   
     return { f'{self.name}_{k}'.strip('_') : v for k,v in metrics.items() }
     
   def OnestepBC(self, world_model, start, task_cond=None, eval_policy=False):
@@ -52,4 +56,5 @@ class BCPolicy(Module):
     start['feat'] = world_model.rssm.get_feat(start)
     inp = start['feat'] if task_cond is None else torch.cat([start['feat'], task_cond], dim=-1)
     policy_dist = self.actor(stop_gradient(inp))
-    return policy_dist.sample(), policy_dist.entropy().mean() 
+    return policy_dist
+    # return policy_dist.mean, policy_dist.entropy().mean() 

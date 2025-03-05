@@ -13,7 +13,7 @@ import hydra
 import numpy as np
 import torch
 import wandb
-from dm_env import specs
+# from dm_env import specs
 
 import tools.utils as utils
 from tools.logger import Logger
@@ -53,6 +53,61 @@ def add_to(dict_of_lists, single_dict):
     """Append values to the corresponding lists in the dictionary."""
     for k, v in single_dict.items():
         dict_of_lists[k].append(v)
+
+def reshape_video(v, n_cols=None):
+    """Helper function to reshape videos."""
+    if v.ndim == 4:
+        v = v[None,]
+
+    _, t, h, w, c = v.shape
+
+    if n_cols is None:
+        # Set n_cols to the square root of the number of videos.
+        n_cols = np.ceil(np.sqrt(v.shape[0])).astype(int)
+    if v.shape[0] % n_cols != 0:
+        len_addition = n_cols - v.shape[0] % n_cols
+        v = np.concatenate((v, np.zeros(shape=(len_addition, t, h, w, c))), axis=0)
+    n_rows = v.shape[0] // n_cols
+
+    v = np.reshape(v, newshape=(n_rows, n_cols, t, h, w, c))
+    v = np.transpose(v, axes=(2, 5, 0, 3, 1, 4))
+    v = np.reshape(v, newshape=(t, c, n_rows * h, n_cols * w))
+
+    return v
+
+
+def get_wandb_video(renders=None, n_cols=None, fps=15):
+    from PIL import Image, ImageEnhance
+    """Return a Weights & Biases video.
+
+    It takes a list of videos and reshapes them into a single video with the specified number of columns.
+
+    Args:
+        renders: List of videos. Each video should be a numpy array of shape (t, h, w, c).
+        n_cols: Number of columns for the reshaped video. If None, it is set to the square root of the number of videos.
+    """
+    # Pad videos to the same length.
+    max_length = max([len(render) for render in renders])
+    for i, render in enumerate(renders):
+        assert render.dtype == np.uint8
+
+        # Decrease brightness of the padded frames.
+        final_frame = render[-1]
+        final_image = Image.fromarray(final_frame)
+        enhancer = ImageEnhance.Brightness(final_image)
+        final_image = enhancer.enhance(0.5)
+        final_frame = np.array(final_image)
+
+        pad = np.repeat(final_frame[np.newaxis, ...], max_length - len(render), axis=0)
+        renders[i] = np.concatenate([render, pad], axis=0)
+
+        # Add borders.
+        renders[i] = np.pad(renders[i], ((0, 0), (1, 1), (1, 1), (0, 0)), mode='constant', constant_values=0)
+    renders = np.array(renders)  # (n, t, h, w, c)
+
+    renders = reshape_video(renders, n_cols)  # (t, c, nr * h, nc * w)
+
+    return wandb.Video(renders, fps=fps, format='mp4')
 
 def make_env(env_name, **env_kwargs):
     return ogbench.make_env_and_datasets(env_name, **env_kwargs)
@@ -175,7 +230,7 @@ class Workspace:
             snapshot_dir = None
 
         if snapshot_dir is not None:        
-            self.load_snapshot(snapshot_dir, resume=False)
+            self.load_snapshot(snapshot_dir, resume=True)
             if self.cfg.reset_world_model:
                 self.agent.wm = sample_agent.wm 
                 # To reset optimization
@@ -246,14 +301,14 @@ class Workspace:
             self._eval_replay_iter = iter(self.eval_replay_loader)
         return self._eval_replay_iter
     
-    def evaluate(self, eval_tasks = None, eval_episodes=3, video_episodes=0, video_frame_skip=3, eval_gaussian=None):
+    def evaluate(self, eval_tasks = None, eval_episodes=0, video_episodes=5, video_frame_skip=3, eval_gaussian=None):
         import tqdm
         renders = []
         eval_metrics = {}
         overall_metrics = defaultdict(list)
         task_infos = self.eval_env.unwrapped.task_infos if hasattr(self.eval_env.unwrapped, 'task_infos') else self.eval_env.task_infos
         num_tasks = eval_tasks if eval_tasks is not None else len(task_infos)
-        num_tasks = 1
+        # num_tasks = 1
         for task_id in tqdm.trange(1, num_tasks + 1):
             task_name = task_infos[task_id - 1]['task_name']
             eval_info, trajs, cur_renders = self._evaluate_fn(
@@ -273,7 +328,11 @@ class Workspace:
                     overall_metrics[k].append(v)
         for k, v in overall_metrics.items():
             eval_metrics[f'overall_{k}'] = np.mean(v)
-        
+        print(eval_metrics)
+        video = get_wandb_video(renders=renders, n_cols=num_tasks)
+        eval_metrics['video'] = video
+        # Dont log the video to the tensorboard logger 
+        wandb.log(eval_metrics, step=self.global_frame)
         # if self.global_step > 0 and self.global_frame % self.cfg.log_episodes_every_frames == 0:
         #     # B, T, C, H, W = video.shape
         #     videos = {'best_episode' : np.stack(best_episode['observation'], axis=0),
@@ -410,9 +469,10 @@ class Workspace:
         eval_metrics = None
         while train_until_step(self.global_step):
             # try to evaluate
-            if eval_every_step(self.global_step):
+            if eval_every_step(self.global_step+1):
                 if self.cfg.eval_modality == 'task':
                     self.evaluate()
+                    return 
                 if self.cfg.eval_modality == 'task_imag':
                     self.eval_imag_behavior()
                 if self.cfg.eval_modality == 'from_text':

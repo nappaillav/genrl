@@ -14,8 +14,8 @@ task: visual-antmaze-medium-navigate-v0
 num_train_frames: 200_010
 num_seed_frames: 400
 # eval
-eval_every_frames: 5000
-eval_modality: data #task # null
+eval_every_frames: 100000
+eval_modality: task #data #task # null
 num_eval_episodes: 10
 # snapshot
 snapshot_dir: ./models/${obs_type}/${task}/${agent.name}/${seed}
@@ -25,7 +25,7 @@ save_every_frames: 5000
 seed: 1
 device: cuda:0
 use_tb: true
-use_wandb: false
+use_wandb: true
 
 # Clip stuff
 viclip_encode: false # dreamer+ogbench
@@ -34,12 +34,12 @@ clip_add_noise: 0.0
 clip_hd_rendering: false
 
 # experiment
-experiment: train
-project_name: ogb
+experiment: DreamerGCBC
+project_name: OGB
 
 # log settings
-log_every_frames: 1_000
-visual_every_frames: 100000000 # edit for debug
+log_every_frames: 1000
+visual_every_frames: 10000 # edit for debug
 log_episodes_every_frames: 100_000
 
 workdir: ???
@@ -50,7 +50,7 @@ train_world_model: true # OGB
 
 reset_connector: false
 reset_world_model: false
-reset_imag_behavior: true
+reset_imag_behavior: false
 
 # loading options
 replay_from_wandb_project: null
@@ -60,8 +60,9 @@ task_snapshot: null
 seed_snapshot: null
 agent_name_snapshot: null
 
+# snapshot_load_dir: /home/wtc/sai/dev/genrl/exp_local/2025.02.17/035810_dreamer
 snapshot_load_dir: null
-replay_load_dir: /home/wtc/sai/genrl/data/ogbench/visual-antmaze-medium-navigate/train
+replay_load_dir: /home/wtc/sai/genrl/data/ogbench/visual-antmaze-medium-navigate/val
 replay_eval_dir: /home/wtc/sai/genrl/data/ogbench/visual-antmaze-medium-navigate/val
 
 # 

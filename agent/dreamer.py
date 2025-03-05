@@ -128,12 +128,14 @@ class DreamerAgent(Module):
         # goal_emb = self.wm.encoder(data, goal_encode=False).unsqueeze(1).repeat(1, self.cfg.batch_length, 1)
         # start = {'goal':stop_gradient(goal_emb)}
         feat_dim = outputs['goal_embed'].shape[-1]
-        task_cond = outputs['goal_embed'].unsqueeze(1).repeat(1, self.cfg.batch_length, 1).reshape(-1, feat_dim)
+        task_cond = outputs['goal_embed'].reshape(-1, feat_dim)     
+        # task_cond = outputs['goal_embed'].unsqueeze(1).repeat(1, self.cfg.batch_length, 1).reshape(-1, feat_dim)
     else:
       data = self.wm.preprocess(data)
       embed = self.wm.encoder(data)
       if self.gc:
-        goal_emb = self.wm.encoder(data, goal_encode=True).unsqueeze(1).repeat(1, self.cfg.batch_length, 1)
+        # goal_emb = self.wm.encoder(data, goal_encode=True).unsqueeze(1).repeat(1, self.cfg.batch_length, 1)
+        goal_emb = self.wm.encoder(data, goal_encode=True)
         # start = {'goal':stop_gradient(goal_emb)}
         task_cond = stop_gradient(goal_emb)
       post, _ = self.wm.rssm.observe(
